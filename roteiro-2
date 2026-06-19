@@ -1,1 +1,184 @@
+-- JANELA/ARQUIVO: 01_Views_Sistema.sql
+USE `dbEvento`;
+
+-- 1) View dos ingressos vendidos com detalhes do evento e cliente
+CREATE OR REPLACE VIEW vw_ingressos_detalhados AS
+SELECT 
+    i.`codIngresso`,
+    e.`nomeEvento`,
+    CONCAT(c.`nome`, ' ', c.`sobrenome`) AS `nomeCliente`,
+    i.`valorPago`,
+    i.`dtCompra`
+FROM `dbEvento`.`INGRESSO_VENDIDO` i
+INNER JOIN `dbEvento`.`EVENTO` e ON i.`EVENTO_idEvento` = e.`idEvento`
+LEFT JOIN `dbEvento`.`CLIENTE` c ON i.`CLIENTE_CPF` = c.`CPF`;
+
+-- 2) View dos eventos com os dados dos seus respectivos responsáveis
+CREATE OR REPLACE VIEW vw_eventos_responsaveis AS
+SELECT 
+    e.`idEvento`,
+    e.`nomeEvento`,
+    emp.`CNPJ`,
+    emp.`nomeEmpresa`
+FROM `dbEvento`.`EVENTO` e
+INNER JOIN `dbEvento`.`EVENTO_EMPRESA` ee ON e.`idEvento` = ee.`EVENTO_idEvento`
+INNER JOIN `dbEvento`.`EMPRESA` emp ON ee.`EMPRESA_CNPJ` = emp.`CNPJ`;
+
+-- 3) View da quantidade e valor arrecadado (Mínimo 100 ingressos vendidos)
+CREATE OR REPLACE VIEW vw_arrecadacao_top_eventos AS
+SELECT 
+    e.`idEvento`,
+    e.`nomeEvento`,
+    COUNT(i.`codIngresso`) AS `quantidadeVendida`,
+    SUM(i.`valorPago`) AS `totalArrecadado`
+FROM `dbEvento`.`EVENTO` e
+INNER JOIN `dbEvento`.`INGRESSO_VENDIDO` i ON e.`idEvento` = i.`EVENTO_idEvento`
+GROUP BY e.`idEvento`, e.`nomeEvento`
+HAVING COUNT(i.`codIngresso`) >= 100;
+
+
+
+
+
+
+
+
+-- JANELA/ARQUIVO: 02_Funcoes_Sistema.sql
+USE `dbEvento`;
+
+SET GLOBAL log_bin_trust_function_creators = 1;
+
+-- 4) Função: Quantidade de ingressos por CPF de cliente
+DROP FUNCTION IF EXISTS fn_qtd_ingressos_cliente;
+DELIMITER $$
+CREATE FUNCTION fn_qtd_ingressos_cliente(p_cpf CHAR(11)) 
+RETURNS INT
+BEGIN
+    DECLARE v_qtd INT DEFAULT 0;
+    SELECT COUNT(`codIngresso`) INTO v_qtd 
+    FROM `dbEvento`.`INGRESSO_VENDIDO` 
+    WHERE `CLIENTE_CPF` = p_cpf;
+    RETURN v_qtd;
+END$$
+DELIMITER ;
+
+-- 5) Função: Retorna o nome completo do cliente pelo CPF
+DROP FUNCTION IF EXISTS fn_nome_cliente;
+DELIMITER $$
+CREATE FUNCTION fn_nome_cliente(p_cpf CHAR(11)) 
+RETURNS VARCHAR(80)
+BEGIN
+    DECLARE v_nome VARCHAR(80);
+    SELECT CONCAT(`nome`, ' ', `sobrenome`) INTO v_nome 
+    FROM `dbEvento`.`CLIENTE` 
+    WHERE `CPF` = p_cpf;
+    RETURN v_nome;
+END$$
+DELIMITER ;
+
+-- 6) Função: Valor arrecadado por id do Evento
+DROP FUNCTION IF EXISTS fn_arrecadacao_evento;
+DELIMITER $$
+CREATE FUNCTION fn_arrecadacao_evento(p_id_evento INT UNSIGNED) 
+RETURNS FLOAT
+BEGIN
+    DECLARE v_total FLOAT DEFAULT 0.0;
+    SELECT IFNULL(SUM(`valorPago`), 0.0) INTO v_total 
+    FROM `dbEvento`.`INGRESSO_VENDIDO` 
+    WHERE `EVENTO_idEvento` = p_id_evento;
+    RETURN v_total;
+END$$
+DELIMITER ;
+
+
+
+
+
+-- JANELA/ARQUIVO: 03_Procedures_Sistema.sql
+USE `dbEvento`;
+
+-- 7) Procedure: Selecionar eventos por local
+DROP PROCEDURE IF EXISTS sp_listar_eventos_por_local;
+DELIMITER $$
+CREATE PROCEDURE sp_listar_eventos_por_local(IN p_local VARCHAR(100))
+BEGIN
+    SELECT `idEvento`, `nomeEvento`, `dtEvento`, `valor`
+    FROM `dbEvento`.`EVENTO`
+    WHERE `localEvento` LIKE CONCAT('%', p_local, '%');
+END$$
+DELIMITER ;
+
+-- 8) Procedure: Alterar o valor base por percentual (Ex: 10 para 10% de aumento ou -5 para 5% de desconto)
+DROP PROCEDURE IF EXISTS sp_ajustar_valor_evento;
+DELIMITER $$
+CREATE PROCEDURE sp_ajustar_valor_evento(IN p_id_evento INT UNSIGNED, IN p_percentual FLOAT)
+BEGIN
+    UPDATE `dbEvento`.`EVENTO`
+    SET `valor` = `valor` + (`valor` * (p_percentual / 100))
+    WHERE `idEvento` = p_id_evento;
+END$$
+DELIMITER ;
+
+-- 9) Procedure: Lista clientes compradores e a respectiva quantidade de compras
+DROP PROCEDURE IF EXISTS sp_resumo_compras_clientes;
+DELIMITER $$
+CREATE PROCEDURE sp_resumo_compras_clientes()
+BEGIN
+    SELECT 
+        c.`nome`, 
+        c.`sobrenome`, 
+        COUNT(i.`codIngresso`) AS `quantidadeIngressos`
+    FROM `dbEvento`.`CLIENTE` c
+    INNER JOIN `dbEvento`.`INGRESSO_VENDIDO` i ON c.`CPF` = i.`CLIENTE_CPF`
+    GROUP BY c.`CPF`, c.`nome`, c.`sobrenome`;
+END$$
+DELIMITER ;
+
+
+
+
+
+-- JANELA/ARQUIVO: 04_Triggers_Sistema.sql
+USE `dbEvento`;
+
+-- Tabela de apoio necessária para a regra 11
+CREATE TABLE IF NOT EXISTS `dbEvento`.`CLIENTE_EXCLUIDO` (
+  `CPF` CHAR(11) NOT NULL,
+  `nome` VARCHAR(25) NOT NULL,
+  `dtNascimento` DATE NOT NULL,
+  `dtExclusao` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`CPF`)
+) ENGINE = InnoDB;
+
+
+-- 10) Trigger: Atualiza a quantidade máxima disponível do evento após uma nova venda
+DROP TRIGGER IF EXISTS tg_atualizar_ingressos_disponiveis;
+DELIMITER $$
+CREATE TRIGGER tg_atualizar_ingressos_disponiveis
+AFTER INSERT ON `dbEvento`.`INGRESSO_VENDIDO`
+FOR EACH ROW
+BEGIN
+    UPDATE `dbEvento`.`EVENTO`
+    SET `quantMaxIngressos` = `quantMaxIngressos` - 1
+    WHERE `idEvento` = NEW.`EVENTO_idEvento`;
+END$$
+DELIMITER ;
+
+
+-- 11) Trigger: Salva o cliente deletado no histórico de Clientes Excluídos
+DROP TRIGGER IF EXISTS tg_backup_cliente_deletado;
+DELIMITER $$
+CREATE TRIGGER tg_backup_cliente_deletado
+BEFORE DELETE ON `dbEvento`.`CLIENTE`
+FOR EACH ROW
+BEGIN
+    INSERT INTO `dbEvento`.`CLIENTE_EXCLUIDO` (`CPF`, `nome`, `dtNascimento`)
+    VALUES (OLD.`CPF`, OLD.`nome`, OLD.`dtNascimento`);
+END$$
+DELIMITER ;
+
+
+
+
+
 
